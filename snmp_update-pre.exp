@@ -1,0 +1,310 @@
+#!/usr/bin/expect -f
+# Expect Script to mass perform a list of commands on all specified devices
+# Hosts must be formatted as HOSTNAME,IP
+# List of Hosts: /home/olaleyea/scripts/poller/udnhosts.txt
+# Command File: /home/olaleyea/scripts/poller/udncmds.txt
+# "write memory" is currently assumed to be the final supplied command - search for ENDLINE to goto
+# Outputs udnerrorlog.txt and udntasklog.txt
+
+match_max 2147483647
+
+## Uncomment for debug
+#exp_internal 1
+
+# Clear Screen
+puts "\033c"
+
+# Set Global Variables
+set maxpass 2
+set udn_err_file "/home/olaleyea/scripts/poller/udnerrorlog.txt"
+set udn_log_file "/home/olaleyea/scripts/poller/udntasklog.txt"
+set udn_hosts_file "/home/olaleyea/scripts/poller/udnhosts.txt"
+set udn_ep_file "/home/olaleyea/scripts/poller/ips_old.txt"
+set udn_cmd_file "/home/olaleyea/scripts/poller/udncmds.txt"
+
+set udn_user [ exec cat $udn_ep_file | head -1 | base64 -d | base64 -d | base64 -d | base64 -d ]
+set udn_user_passwd [ exec cat $udn_ep_file | head -2 | tail -1 | base64 -d | base64 -d | base64 -d | base64 -d ]
+
+set timeout 180
+
+set timestamp [timestamp -format %Y-%m-%d_%H:%M]
+
+# Initialise error amount
+set errors 0
+
+# Turn off local logging
+log_user 0
+
+# Header Info
+puts "\033c"
+puts "Currently processing UDN hosts"
+puts "==============================\n"
+
+# Count number of devices in UDN file
+set fid [open $udn_hosts_file r]
+	set udnDeviceCount 0
+	while {[gets $fid udnHost] != -1} {
+		if {$udnHost != ""} {
+			incr udnDeviceCount
+		}
+	}
+close $fid
+
+# Count number of commands in command file
+set fid [open $udn_cmd_file r]
+	set udnCommandCount 0
+	while {[gets $fid udnCommand] != -1} {
+		if {$udnCommand != ""} {
+			incr udnCommandCount
+		}
+	}
+close $fid
+
+if {$udnDeviceCount == 0} {
+	puts "No UDN devices found.\n"
+	exit
+}
+
+# Open files containing list of devices to be processed
+set udnCurrentCount 0
+set fid [open $udn_hosts_file r]
+set errfile [open $udn_err_file w]
+set tasklogfile [open $udn_log_file w]
+
+# For each device do the following...
+# Now with extra pass functionality
+
+set firsttime 1
+
+while {[gets $fid udnRecord] != -1} {
+    if {[catch {exec ps $pid} std_out] == 0} {
+        catch {close}
+        wait -nowait
+    }
+	set hdr [string index $udnRecord 0]
+	if {$hdr eq ""} {
+		continue
+	}
+	set loggedin 0
+	incr udnCurrentCount
+	set fields [split $udnRecord ,]
+	lassign $fields udnDeviceName udnHost
+	set udnDeviceNameLowercase [string tolower $udnDeviceName]
+	for {set extrapass 0} {$extrapass < $maxpass} {incr extrapass} {
+        puts "$udnDeviceName ($udnHost) - $udnCurrentCount/$udnDeviceCount - pass [expr $extrapass +1]/$maxpass"
+        if {$firsttime == 0} {
+            set timeout 5
+            expect {
+                "closed" {
+                    # nothing
+                }
+                "rejected" {
+                    # nothing
+                }
+                "no route to host" {
+                    # nothing
+                }
+                timeout {
+                    close
+                }
+            }
+            set timeout 180
+        }
+        set firsttime 0
+        # ssh to host
+        spawn ssh $udn_user@$udnHost
+        expect {
+            "Are you sure you want to continue connecting (yes/no)" {
+                    send "yes\r"
+                    exp_continue
+             }
+            "ser:*" {
+                send "$udn_user\r"
+                sleep 5
+                exp_continue
+            }
+            "assword:*" {
+                send "$udn_user_passwd\r"
+                set pw_error 0
+                sleep 1
+                expect {
+                    "ser:" {
+                        if {$pw_error == $maxpass} {
+                            set errormsg "$udnDeviceName,$udnHost,Login credentials rejected $maxpass times\r\n"
+                            puts "\tERROR - LOGIN CREDENTIALS REJECTED $maxpass TIMES"
+                        } else {
+                            puts "\tRETURNED TO USER SECTION, AUTHENTICATION ATTEMPT [expr $pw_error + 1]/$maxpass"
+                            incr pw_error
+                            send "$udn_user\r"
+                            exp_continue
+                        }
+                    }
+                    "assword:" {
+                        if {$pw_error == $maxpass} {
+                            set errormsg "$udnDeviceName,$udnHost,Login credentials rejected $maxpass times\r\n"
+                            puts "\tERROR - LOGIN CREDENTIALS REJECTED $maxpass TIMES"
+                        } else {
+                            puts "\tRETURNED TO PW SECTION, AUTHENTICATION ATTEMPT [expr $pw_error + 1]/$maxpass"
+                            incr pw_error
+                            send "$udn_user_passwd\r"
+                            exp_continue
+                        }
+                    }
+                    "$udnDeviceName#" {
+                        set loggedin 1
+                        set upper 1
+                        set special 0
+                        break
+                    }
+                    "$udnDeviceNameLowercase#" {
+                        set loggedin 1
+                        set upper 0
+                        set special 0
+                        break
+                    }
+                    "$udnDeviceName>" {
+                        set loggedin 1
+                        set upper 1
+                        set special 1
+                        break
+                    }
+                    "$udnDeviceNameLowercase>" {
+                        set loggedin 1
+                        set upper 0
+                        set special 1
+                        break
+                    }
+                    ">" {
+                        set loggedin 1
+                        set upper 0
+                        set special 2
+                        break
+                    }
+                    "Connection rejected" {
+                        puts "\tERROR - CONNECTION REJECTED"
+                        set errormsg "$udnDeviceName,$udnHost,Connection rejected\r\n"
+                    }
+                    "Permission denied" {
+                        puts "\tERROR - UNABLE TO LOGIN"
+                        set errormsg "$udnDeviceName,$udnHost,Permission denied\r\n"
+                    }
+                    "Closed" {
+                        puts "\tERROR - CONNECTION CLOSED"
+                        set errormsg "$udnDeviceName,$udnHost,Connection closed\r\n"
+                    }
+                }
+            }
+            "Could not resolve" {
+                puts "\tERROR - HOSTNAME NOT KNOWN"
+                set errormsg "$udnDeviceName,$udnHost,Could not resolve\r\n"
+            }
+            "Permission denied" {
+                puts "\tERROR - UNABLE TO LOGIN"
+                set errormsg "$udnDeviceName,$udnHost,Permission denied\r\n"
+            }
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" {
+                puts "\tERROR - REMOTE HOST IDENTIFICATION HAS CHANGED"
+                set errormsg "$udnDeviceName,$udnHost,Remote host identification has changed\r\n"
+            }
+            "Connection closed by" {
+                puts "\tERROR - CONNECTION REJECTED"
+                set errormsg "$udnDeviceName,$udnHost,Connection rejected\r\n"
+            }
+            "Connection refused" {
+                puts "\tERROR - CONNECTION REJECTED"
+                set errormsg "$udnDeviceName,$udnHost,Connection rejected\r\n"
+            }
+            "No route to host" {
+                puts "\tERROR - NO ROUTE TO HOST"
+                set errormsg "$udnDeviceName,$udnHost,No route to host\r\n"
+            }
+            "Connection timed out" {
+                puts "\tERROR - TIMEOUT"
+                set errormsg "$udnDeviceName,$udnHost,Timeout\r\n"
+            }
+            timeout {
+                puts "\tERROR - TIMEOUT (completely unresponsive)"
+                set errormsg "$udnDeviceName,$udnHost,Timeout (completely unresponsive)\r\n"
+            }
+        }
+    }
+	# Check that we successfully logged in
+	if {$loggedin == 1} {
+	    send "terminal len 0\r"
+	    if {$special >= 1} {
+	        expect ">"
+	    } else {
+	        expect "#"
+	    }
+	    if {$upper == 1} {
+	        if {$special == 1} {
+	            set endprompt [set udnDeviceName]>
+	        } else {
+	            set endprompt [set udnDeviceName]#
+	        }
+	    } else {
+	        if {$special == 1} {
+	            set endprompt [set udnDeviceNameLowercase]>
+	        } else {
+	            set endprompt [set udnDeviceNameLowercase]#
+	        }
+	    }
+	    if {$special == 2} {
+	        set endprompt >
+	    }
+	    set cmdfile [open $udn_cmd_file r]
+	    set commandcount 1
+		# marks output files
+	    set WriteFileName $udnDeviceName-$timestamp-A.txt
+	    while {[gets $cmdfile udncmd] != -1} {
+	        puts "\tSending command $commandcount/$udnCommandCount"
+	        send "$udncmd\r"
+			log_file -a $WriteFileName
+	        expect $endprompt
+            log_file
+	        sleep 1
+	        incr commandcount
+        }
+	    close $cmdfile
+	    # ENDLINE
+#	    send "write memory\r"
+#	    expect {
+#	        "Compressed configuration" {
+#	            puts -nonewline $tasklogfile "$udnDeviceName,$udnHost,Success\r\n"
+#	            puts "\tSuccess"
+#	        }
+#	        "\[OK]" {
+#	        	puts -nonewline $tasklogfile "$udnDeviceName,$udnHost,Success\r\n"
+#	            puts "\tSuccess"
+#	        }
+#	        "Attempting to overwrite an NVRAM configuration" {
+#	            puts -nonewline $errfile "$udnDeviceName,$udnHost,Attempting to overwrite an NVRAM configuration\r\n"
+#	        	puts -nonewline $tasklogfile "$udnDeviceName,$udnHost,Attempting to overwrite an NVRAM configuration\r\n"
+#	            puts "\tError - Attempting to overwrite an NVRAM configuration"
+#	        }
+#	        timeout {
+#	            puts -nonewline $errfile "$udnDeviceName,$udnHost,Write memory failed\r\n"
+#	        	puts -nonewline $tasklogfile "$udnDeviceName,$udnHost,Write memory failed\r\n"
+#	            puts "\tWrite memory failed"
+#	        }
+#	    }
+	    send "exit\r"
+	} elseif {$maxpass == $extrapass} {
+	    # error handling
+        puts -nonewline $errfile $errormsg
+        puts -nonewline $tasklogfile $errormsg
+    } else {
+        puts "\tError - MISCELLANEOUS LOGIN FAILURE"
+        puts -nonewline $errfile "$udnDeviceName,$udnHost,Misc. Login Failure\r\n"
+        puts -nonewline $tasklogfile "$udnDeviceName,$udnHost,Misc. Login Failure\r\n"
+    }
+}
+
+# Close File containing list of devices
+close $fid
+
+# Close error file
+close $errfile
+
+# Closes log file
+close $tasklogfile
