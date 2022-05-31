@@ -7,9 +7,10 @@
     #grab post config changes (write to file)
 import paramiko
 import os.path
-
-ssh = paramiko.SSHClient
-ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())           #Add SSH host key automatically if required
-ssh.connect("10.57.128.1", port=22, username="olaleyea", password="Adedamola86")
-print("I'm in")
-ssh.close()
+device_file = open("Device.txt", "r")
+for device in device_file:
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())           #Add SSH host key automatically if required
+    ssh.connect(device, port=22, username="olaleyea", password="Adedamola86")
+    print("I'm in")
+    ssh.close()
